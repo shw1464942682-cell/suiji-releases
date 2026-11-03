@@ -1,0 +1,56 @@
+name: Generate app update manifest
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v1.8.0'
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: update-manifest-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate signed APK and publish update.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/suiji-release"
+          cd "$RUNNER_TEMP/suiji-release"
+          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json assets,body,tagName,isDraft,isPrerelease > release.json
+          test "$(jq '[.assets[] | select(.name | endswith(".apk"))] | length' release.json)" -eq 1
+          test "$(jq -r '.isDraft or .isPrerelease' release.json)" = false
+          apk_name="$(jq -r '.assets[] | select(.name | endswith(".apk")) | .name' release.json)"
+          # Fixed local destination; asset names are data, never shell code or local paths.
+          asset_url="$(jq -r '.assets[] | select(.name | endswith(".apk")) | .url' release.json)"
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 "$asset_url" --output app.apk
+          tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$tools_dir/apksigner" verify --verbose --print-certs app.apk > signature.txt
+          grep -Fqi 'Signer #1 certificate SHA-256 digest: d93a7cd4c3362d4224c0eff2fe70bb0d25491119736ef6ebc2442d123d45357b' signature.txt
+          "$tools_dir/aapt2" dump badging app.apk > badging.txt
+          python3 - <<'PY'
+          import json, pathlib, re, hashlib
+          release=json.loads(pathlib.Path('release.json').read_text())
+          line=pathlib.Path('badging.txt').read_text().splitlines()[0]
+          fields=dict(re.findall(r"(\w+)='([^']*)'",line))
+          assert fields['name']=='cn.suiji.ledger', 'Wrong package'
+          code=int(fields['versionCode']); assert 0 < code <= 2147483647
+          apk=pathlib.Path('app.apk'); size=apk.stat().st_size; assert 0<size<=128*1024*1024
+          asset=next(a for a in release['assets'] if a['name'].endswith('.apk'))
+          assert asset['url'].startswith('https://')
+          name=fields['versionName']; assert name.strip() and len(name.encode('utf-16-le'))//2<=80
+          # Android String.length counts UTF-16 units; never split an emoji surrogate pair.
+          notes=(release['body'] or '').encode('utf-16-le')[:8000].decode('utf-16-le',errors='ignore')
+          manifest=dict(packageName=fields['name'],versionCode=code,versionName=name,apkUrl=asset['url'],sha256=hashlib.sha256(apk.read_bytes()).hexdigest(),sizeBytes=size,notes=notes)
+          pathlib.Path('update.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+          gh release upload "$RELEASE_TAG" update.json --repo "$GH_REPO" --clobber
