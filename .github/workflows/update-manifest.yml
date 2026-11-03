@@ -34,7 +34,7 @@ jobs:
           asset_url="$(jq -r '.assets[] | select(.name | endswith(".apk")) | .url' release.json)"
           curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 "$asset_url" --output app.apk
           tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
-          "$tools_dir/apksigner" verify --verbose --print-certs app.apk > signature.txt
+          "$tools_dir/apksigner" verify --verbose --print-certs app.apk | tee signature.txt
           grep -Fqi 'Signer #1 certificate SHA-256 digest: d93a7cd4c3362d4224c0eff2fe70bb0d25491119736ef6ebc2442d123d45357b' signature.txt
           "$tools_dir/aapt2" dump badging app.apk > badging.txt
           python3 - <<'PY'
